@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from pandasai import SmartDataframe
-from pandasai.llm import OpenAI
+from openai import OpenAI as OpenAIClient
 import os
 
 # --- LLM 클래스 지정 및 Streamlit Cloud Secrets에서 API 키 로드 ---
@@ -17,22 +17,37 @@ def get_api_key():
 api_key = get_api_key()
 
 # 1. 페이지 설정
-st.set_page_config(page_title="📊 PandasAI 기반 엑셀 분석기", layout="centered")
-st.title("📊 GPT-3.5 Turbo 기반 데이터 분석기")
-st.markdown("Streamlit Cloud Secrets를 사용하여 API 키 노출 없이 안전하게 분석을 수행합니다. (키 이름: `OPENAI_API_KEY`)")
+st.set_page_config(page_title="📊 PandasAI 기반 엑셀 분석기 (SDK)", layout="centered")
+st.title("📊 GPT-3.5 Turbo 기반 데이터 분석기 (SDK 통합)")
+st.markdown("공식 OpenAI SDK를 사용하여 분석을 수행하며, API 키는 Secrets를 통해 안전하게 관리됩니다.")
+
+llm_client = None
+llm_config = None
 
 if not api_key:
     st.error("❌ 오류: Streamlit Cloud Secrets나 로컬 환경 변수 **'OPENAI_API_KEY'**가 설정되지 않았습니다.")
     st.info("앱을 실행하려면, 해당 환경 변수에 실제 API 키를 설정해야 합니다.")
 else:
-    # 2. 파일 업로드 및 데이터 로드
+    # 2. LLM 연결 설정 (공식 SDK 사용)
+    try:
+        # 공식 OpenAI 클라이언트 생성 (SDK 사용)
+        llm_client = OpenAIClient(api_key=api_key)
+        
+        # SmartDataframe 초기화에 필요한 설정 준비
+        llm_config = {"llm": llm_client, "model": "gpt-3.5-turbo"}
+        st.success("✅ OpenAI SDK 클라이언트 생성 완료")
+
+    except Exception as e:
+        st.error(f"❌ LLM 설정 오류: 공식 OpenAI SDK 클라이언트 생성 실패. ({e})")
+
+    # 3. 파일 업로드 및 데이터 로드
     uploaded_file = st.file_uploader(
         "1. 분석할 엑셀 파일(.xlsx)을 업로드하세요.",
         type=["xlsx"],
-        help="PandasAI는 파일 업로드 후 데이터를 GPT에 전송하여 분석합니다."
+        help="데이터가 LLM에 전달되어 분석됩니다."
     )
 
-    if uploaded_file is not None:
+    if uploaded_file is not None and llm_config:
         st.success("✅ 파일 업로드 완료. 데이터를 로드합니다.")
         
         try:
@@ -42,18 +57,16 @@ else:
             st.dataframe(data.head()) # 상위 5행 표시
             st.info(f"데이터 크기: {data.shape[0]} 행, {data.shape[1]} 열")
             
-            # 3. LLM 연결 및 SmartDataframe 초기화
-            with st.spinner("⏳ LLM 연결 및 SmartDataframe 초기화 중..."):
+            # 4. SmartDataframe 초기화
+            with st.spinner("⏳ SmartDataframe 초기화 중..."):
                 
-                # OpenAI LLM 초기화 (V3.0.0 호환성을 위해 api_key 사용)
-                llm = OpenAI(model="gpt-3.5-turbo", api_key=api_key)
+                # SmartDataframe 초기화 (SDK 클라이언트가 포함된 config 딕셔너리 사용)
+                sdf = SmartDataframe(data, config=llm_config)
+                st.session_state['sdf'] = sdf
                 
-                # SmartDataframe 초기화 (config 딕셔너리 방식)
-                sdf = SmartDataframe(data, config={"llm": llm})
-                
-                st.success("✅ LLM 및 SmartDataframe 초기화 성공!")
+                st.success("✅ SmartDataframe 초기화 성공!")
 
-            # 4. 사용자 입력 및 분석 실행
+            # 5. 사용자 입력 및 분석 실행
             st.subheader("3. 분석 질문 입력")
             
             # Form을 사용하여 입력과 버튼 클릭을 명확하게 분리
@@ -70,7 +83,7 @@ else:
                     with st.spinner("⏳ GPT-3.5 Turbo가 분석 코드를 생성하고 실행 중입니다..."):
                         try:
                             # PandasAI 질의 수행
-                            result = sdf.chat(user_prompt)
+                            result = st.session_state['sdf'].chat(user_prompt)
                             
                             st.subheader("💡 분석 결과")
                             
@@ -90,4 +103,3 @@ else:
                     
         except Exception as e:
             st.error(f"❌ 데이터 로드 오류: 파일 내용이나 형식을 확인해 주세요. ({e})")
-
