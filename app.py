@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from pandasai import SmartDataframe
-from pandasai.llm.openai import OpenAI
+from pandasai.llm import OpenAI
 import os
 
 # --- LLM 클래스 지정 및 Streamlit Cloud Secrets에서 API 키 로드 ---
@@ -90,3 +90,4 @@ else:
                     
         except Exception as e:
             st.error(f"❌ 데이터 로드 오류: 파일 내용이나 형식을 확인해 주세요. ({e})")
+
