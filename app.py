@@ -90,4 +90,3 @@ else:
                     
         except Exception as e:
             st.error(f"❌ 데이터 로드 오류: 파일 내용이나 형식을 확인해 주세요. ({e})")
-```eof
