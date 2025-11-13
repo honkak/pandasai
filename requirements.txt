@@ -1,9 +1,9 @@
 streamlit
 pandas
-# 엑셀 파일 로드를 위해 필요합니다.
 openpyxl
 
-# pandasai와 그 핵심 의존성입니다.
-pandasai
-openai
-pydantic
+# PandasAI와 충돌을 방지하기 위해 버전을 고정합니다.
+# 2.3.2 버전은 상대적으로 널리 사용되었던 안정 버전입니다.
+pandasai==2.3.2
+openai==1.77.0
+pydantic==2.11.5
