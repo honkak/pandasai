@@ -1,4 +1,9 @@
 streamlit
 pandas
-pandasai
+# 엑셀 파일 로드를 위해 필요합니다.
 openpyxl
+
+# pandasai와 그 핵심 의존성입니다.
+pandasai
+openai
+pydantic
