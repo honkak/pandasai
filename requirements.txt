@@ -5,8 +5,9 @@ openpyxl
 # PandasAI와 충돌을 방지하기 위해 버전을 고정합니다.
 # 2.3.2 버전은 상대적으로 널리 사용되었던 안정 버전입니다.
 pandasai==2.3.2
+# pandasai 2.x 버전에 호환되는 핵심 의존성 버전을 고정합니다.
 openai==1.77.0
-pydantic==2.11.5
+pydantic==1.10.13
 # LangChain 기반 분석에 필요한 패키지
 langchain
 langchain-openai
