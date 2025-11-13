@@ -7,3 +7,7 @@ openpyxl
 pandasai==2.3.2
 openai==1.77.0
 pydantic==2.11.5
+# LangChain 기반 분석에 필요한 패키지
+langchain
+langchain-openai
+langchain-experimental
