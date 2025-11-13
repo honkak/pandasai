@@ -1,5 +1,5 @@
 streamlit
-pandas
+pandas==1.5.3
 openpyxl
 
 # PandasAI와 충돌을 방지하기 위해 버전을 고정합니다.
