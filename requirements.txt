@@ -1,5 +1,7 @@
 streamlit
+finance-datareader>=0.9.94
 pandas
-openpyxl
-pandasai==2.3.2
-openai
+beautifulsoup4>=4.9.3
+plotly>=5.0.0
+yfinance
+streamlit-analytics
