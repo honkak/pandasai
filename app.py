@@ -136,7 +136,7 @@ class AnalysisInitializer:
     def __init__(self, uploaded_file):
         self._model = LLM_MODEL
         self._instruction = CUSTOM_INSTRUCTION
-        self.uploaded_file = uploaded_file
+        self.uploaded_files = uploaded_files   # ✅ 여러 파일 지원
         self.llm: Optional[OpenAI] = None
         self.sdf: Optional[SmartDataframe] = None
 
@@ -163,20 +163,20 @@ class AnalysisInitializer:
         return self.sdf, df, self.llm
 
     # ======================================================
-    # 엑셀 로드 → 전처리 → (여러 파일 병합 구조 유지, 여기서는 업로드된 1개 파일 리스트로 처리)
+    # 엑셀 로드 → 전처리 → 여러 개 업로드된 파일 병합
     # ======================================================
     def _load_data(self) -> pd.DataFrame:
-        if self.uploaded_file is None:
+        if not self.uploaded_files:
             raise FileNotFoundError("⚠️ 업로드된 엑셀 파일이 없습니다.")
 
-        excel_files = [self.uploaded_file]  # 하나짜리 리스트로 래핑
+        excel_files = self.uploaded_files  # ✅ 여러 파일 직접 사용
 
         print(f"📂 총 {len(excel_files)}개 파일 감지됨:")
         for f in excel_files:
             print(f" - {getattr(f, 'name', 'uploaded_file')}")
 
         all_dfs = []
-
+        
         # --------------------------------------------------
         # 1️⃣ 개별 파일 전처리 (원본과 동일한 로직)
         # --------------------------------------------------
@@ -630,11 +630,14 @@ st.sidebar.header("📁 엑셀 업로드")
 uploaded_file = st.sidebar.file_uploader(
     "사전배관제작 물량 엑셀 파일을 선택하세요 (.xlsx)",
     type=["xlsx"]
+    accept_multiple_files=True  # ✅ 여러 개 파일 허용
 )
 
 if not uploaded_file:
     st.info("👈 왼쪽 사이드바에서 엑셀 파일을 업로드하면 분석을 시작할 수 있습니다.")
     st.stop()
+    
+initializer = AnalysisInitializer(uploaded_files)  # 리스트 그대로 전달
 
 # --- 초기화 (RESET_ON_QUERY 고려해서 세션에 저장) ---
 if "sdf" not in st.session_state or "df" not in st.session_state or "llm" not in st.session_state or RESET_ON_QUERY:
@@ -711,4 +714,5 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
