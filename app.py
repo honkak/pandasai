@@ -629,7 +629,7 @@ st.markdown("---")
 st.sidebar.header("📁 엑셀 업로드")
 uploaded_file = st.sidebar.file_uploader(
     "사전배관제작 물량 엑셀 파일을 선택하세요 (.xlsx)",
-    type=["xlsx"]
+    type=["xlsx"],
     accept_multiple_files=True  # ✅ 여러 개 파일 허용
 )
 
@@ -714,5 +714,6 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
