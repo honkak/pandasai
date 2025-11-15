@@ -3,5 +3,5 @@ openai
 streamlit>=1.31.0
 pandasai==2.3.2
 openpyxl
-numpy>=1.24.0
+numpy==1.23.5 
 regex>=2023.12.25
