@@ -108,23 +108,40 @@ st.set_page_config(
     layout="wide"
 )
 
+st.sidebar.subheader("🔐 OpenAI API 키 입력")
+if "OPENAI_API_KEY" not in st.session_state:
+    st.session_state.OPENAI_API_KEY = ""
+
+
+api_key_input = st.sidebar.text_input("OpenAI API Key 입력 (sk-...)", type="password", value=st.session_state.OPENAI_API_KEY)
+if st.sidebar.button("💾 키 저장"):
+    if api_key_input.startswith("sk-"):
+        st.session_state.OPENAI_API_KEY = api_key_input
+        st.sidebar.success("✅ API 키 저장 완료")
+    else:
+        st.sidebar.warning("⚠️ 유효한 OpenAI 키 형식이 아닙니다.")
+
+# ======================================================
+# API 키 확인 후 진행
+# ======================================================
+if not st.session_state.get("OPENAI_API_KEY", "").startswith("sk-"):
+    st.warning("👈 왼쪽에서 OpenAI API 키를 먼저 입력하고 저장하세요.")
+    st.stop()
+
+
 # ======================================================
 # 1. 분석 환경 초기화 (AnalysisInitializer) - 폴더 순회 로직 유지/응용
 # ======================================================
 class AnalysisInitializer:
     def __init__(self, uploaded_file):
-        # CTk 버전과 동일한 멤버 구조 유지 (API_FILE 대신 secrets 사용)
         self._model = LLM_MODEL
         self._instruction = CUSTOM_INSTRUCTION
+        self.uploaded_file = uploaded_file
         self.llm: Optional[OpenAI] = None
         self.sdf: Optional[SmartDataframe] = None
-        self.uploaded_file = uploaded_file  # Streamlit 업로드 파일
 
     def initialize(self) -> Tuple[SmartDataframe, pd.DataFrame, OpenAI]:
-        # API 키는 Streamlit Secrets에서 가져옴
-        if "OPENAI_API_KEY" not in st.secrets:
-            raise RuntimeError("Streamlit secrets에 OPENAI_API_KEY가 없습니다.")
-        api_key = st.secrets["OPENAI_API_KEY"]
+        api_key = st.session_state["OPENAI_API_KEY"]
         openai.api_key = api_key
 
         df = self._load_data()
@@ -149,9 +166,6 @@ class AnalysisInitializer:
     # 엑셀 로드 → 전처리 → (여러 파일 병합 구조 유지, 여기서는 업로드된 1개 파일 리스트로 처리)
     # ======================================================
     def _load_data(self) -> pd.DataFrame:
-        # CTk 버전은 폴더 내 excel_files를 순회했지만,
-        # Streamlit에서는 업로드된 파일 1개를 "excel_files 리스트"처럼 취급해서
-        # 기존 전처리/병합 로직을 그대로 재사용한다.
         if self.uploaded_file is None:
             raise FileNotFoundError("⚠️ 업로드된 엑셀 파일이 없습니다.")
 
@@ -697,3 +711,4 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
