@@ -641,7 +641,6 @@ initializer = AnalysisInitializer(uploaded_files)  # 리스트 그대로 전달
 
 # --- 초기화 (RESET_ON_QUERY 고려해서 세션에 저장) ---
 if "sdf" not in st.session_state or "df" not in st.session_state or "llm" not in st.session_state or RESET_ON_QUERY:
-    initializer = AnalysisInitializer(uploaded_file)
     sdf_instance, df, llm_instance = initializer.initialize()
     st.session_state.sdf = sdf_instance
     st.session_state.df = df
@@ -714,6 +713,7 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
 
