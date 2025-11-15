@@ -1,5 +1,22 @@
+[general]
+# 앱이 매번 최신 코드로 새로고침되도록 보장
+showWarningOnDirectExecution = false
+
 [server]
+# Streamlit Cloud에서 기본적으로 headless 모드로 실행되므로 True로 설정
 headless = true
+enableCORS = false
+enableXsrfProtection = true
+port = 8501
+
+[client]
+# 기본 브라우저에서 자동 실행 방지 (Cloud 환경에서 불필요)
+showErrorDetails = true
+
+[theme]
+# 선택사항: Streamlit UI 기본 테마
+base = "light"
 
 [python]
+# ✅ 핵심: Python 3.11로 강제 지정
 version = "3.11"
