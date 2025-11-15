@@ -696,6 +696,10 @@ if submitted:
             if engine.is_dataframe(result):
                 df_out = result.get("value", result)
 
+                # ✅ 이 한 줄로 실제 필터링된 df를 화면에 표시
+                st.subheader("📋 필터링된 데이터프레임 결과")
+                st.dataframe(df_out)
+                
                 # 통계 분석
                 stats = engine.analyze_dataframe(df_out)
 
@@ -713,6 +717,7 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
 
