@@ -1,422 +1,699 @@
-########################################
-#주식 차트비교 서비스 개발_2025.10.06#
-########################################
+# ======================================================
+# 본격 편집 중 REV7 - PandasAI Streamlit App (CTk 로직 완전 이식)
+# ======================================================
 
 import streamlit as st
-import FinanceDataReader as fdr
-import datetime
 import pandas as pd
-import yfinance as yf
-# import streamlit_analytics <- 제거됨
+from pandasai import SmartDataframe
+from pandasai.llm.openai import OpenAI
+import openai
+from typing import Optional, Any, Dict, List, Tuple
+import re
+import sys
+import json
+import os
 
-#서비스 제목 입력
-st.markdown("<h2 style='font-size: 24px; text-align: center;'>다빈치 주식차트 겹치기 </h2>", unsafe_allow_html=True)
+# ======================================================
+# 0. 설정 및 상수 정의
+# ======================================================
+LLM_MODEL = "gpt-3.5-turbo"  # "gpt-3.5-turbo", "gpt-4o"
+RESET_ON_QUERY = True  # True: 매 쿼리마다 SmartDataframe 재생성 / False: 세션 재사용
 
-# 날짜 입력 (조회 시작일과 종료일을 같은 행에 배치)
-col_start_date, col_end_date = st.columns(2)
+# ======================================================
+# 📌 LLM 동작 규칙 (원본 그대로)
+# ======================================================
+CUSTOM_INSTRUCTION = """
+이 데이터프레임의 분석을 위해 반드시 다음 규칙을 따르세요.
 
-with col_start_date:
-    start_date = st.date_input(
-        "조회 시작일을 선택해 주세요",
-        datetime.datetime(2025, 1, 1)
-    )
+========================================================
+1. DataFrame 사용 규칙
+========================================================
+- SmartDataframe 내부의 df '하나만' 사용해야 합니다.
+- df 외에 dfs, temp_df, new_df 등 새로운 리스트나 데이터프레임을 만들지 마십시오.
+- 절대 df를 리스트로 감싸거나 반복문으로 처리하지 마십시오.
 
-with col_end_date:
-    end_date = st.date_input(
-        "조회 종료일을 선택해 주세요",
-        datetime.datetime.now()
-    )
+========================================================
+2. 필터링 규칙 (핵심)
+========================================================
+DataFrame 필터링은 반드시 아래 형식만 허용합니다:
 
-# 시작 날짜와 종료 날짜 비교
-if start_date > end_date:
-    st.warning("시작일이 종료일보다 더 늦습니다. 날짜를 자동으로 맞바꿔 반영합니다.")
-    start_date, end_date = end_date, start_date  # 날짜를 바꿈
+df_filtered = df[
+    (df['컬럼'] == 값) &
+    (df['컬럼'] == 값)
+]
 
-# 세 개의 종목 코드 입력 필드
-#아래 '종목코드를 입력하세요' 글자 스타일 변경
-st.markdown("""
-    <style>
-    input::placeholder {
-        font-size: 13px; /* 글자 크기 */
-        color: grey; /* 글자 색상 */
-    }
-    </style>
-    """, unsafe_allow_html=True)
+아래 동작은 절대 금지합니다:
+- (df['컬럼'] == 값).all()
+- for df in dfs
+- dfs = [df for df in dfs ...]
+- pd.concat()
+- 여러 개의 df를 리스트에 담아 처리
 
-col_code1, col_code2, col_code3 = st.columns(3)
+========================================================
+3. 그룹바이/집계 규칙
+========================================================
+- 집계(sum, mean 등)는 단일 df 객체에서만 수행하십시오.
+- df.groupby(...) 는 허용됩니다.
+- df_list, concat, merge 등 두 개 이상의 DF를 만들어 조작하는 행위를 금지합니다.
 
-with col_code1:
-    code1 = st.text_input('종목코드 1', value='QQQ', placeholder='종목코드를 입력하세요 - (예시)QQQ') # 기본값을 'QQQ'로 설정
+========================================================
+4. 결과 반환 규칙
+========================================================
+반드시 아래 형식으로 반환해야 합니다:
 
-with col_code2:
-    code2 = st.text_input('종목코드 2', value='', placeholder='종목코드를 입력하세요 - (예시)005930')
+result = {"type": "dataframe", "value": df_filtered}
 
-with col_code3:
-    code3 = st.text_input('종목코드 3', value='', placeholder='종목코드를 입력하세요 - (예시)AAPL')
+========================================================
+5. 코드 안전 규칙
+========================================================
+- Python 문법 오류가 발생하는 코드는 생성하지 마십시오.
+- 존재하지 않는 변수(dfs, temp_df 등)를 사용하지 마십시오.
+"""
 
-# 세 입력 필드가 모두 입력된 후에 트래킹 코드가 작동 - 제거됨
-# streamlit_analytics.track()
+# ======================================================
+# 컬럼 및 값 동의어 (원본 그대로)
+# ======================================================
+COLUMN_SYNONYMS = {
+    "장비명": ["장비"],
+    "UT": ["공종", "설비", "유틸리티", "utility"],
+    "Floor": ["층수", "플로어"],
+    "사전제작X_비대상(일부공정)(1)_길이": ["비대상"],
+    "사전제작X_A(장비단Final)(2)_길이": ["장비단"],
+    "사전제작○_B(H_UP구간)(3)_당초계획_길이": ["계획물량"],
+    "사전제작○_B(H_UP구간)(4)_실제시공_길이": ["시공물량"],
+    "사전제작X_C(TV단Final)(5)_길이": ["테핑밸브단"],
+    "합계(1+2+4+5)": ["총합"]
+}
 
-# 종목 코드 리스트
-codes = [code1.strip(), code2.strip(), code3.strip()]
+VALUE_SYNONYMS = {
+    "1F": ["1층"],
+    "2F": ["2층"],
+    "3F": ["3층"],
+    "Bulk Gas": ["벌크가스", "bulk gas"],
+    "Drain": ["드레인", "drain"],
+    "Exhaust": ["이그저스트", "exhaust"],
+    "UPW(DI)": ["초순수"],
+    "PCW": ["프로세스쿨링워터"],
+    "NPW": ["공업용수"],
+    "Chemical": ["케미칼", "chemical"],
+    "Pumping": ["펌프", "pumping"],
+    "Toxic Gas": ["톡식가스", "toxic gas"],
+}
 
-# 지수 코드 리스트 (필요에 따라 확장 가능)
-# 대표적인 지수들 예시
-index_codes = ['KS11', 'DJI', 'JP225', 'KQ11', 'IXIC', 'STOXX50E', 'KS50', 'GSPC', 'CSI300', 'KS100', 'S&P500', 'VIX', 'KOSPI100', 'HSI', 'KRX100', 'FTSE', 'KS200', 'DAX', 'CAC', 'GSPC'] 
+# ======================================================
+# Streamlit 페이지 설정
+# ======================================================
+st.set_page_config(
+    page_title="📊 PandasAI 대화형 데이터 분석기 (Streamlit)",
+    layout="wide"
+)
 
-# 종목 정보 가져오기
-stocks_info = {}
-for code in codes:
-    if code:
-        try:
-            # 한국 종목 코드에 .KS 추가, 미국 종목은 그대로 사용, 지수는 ^를 붙여서 사용
-            if code.isdigit():
-                stock = yf.Ticker(f"{code}.KS")
-            elif code in index_codes:  # 지수 목록에 있는 경우에는 ^ 추가
-                # FinanceDataReader가 아닌 yfinance를 사용하는 경우, 지수 코드를 그대로 사용하거나 ^를 붙여야 할 수 있습니다.
-                # 여기서는 yfinance를 사용하므로 ^를 붙이는 것이 일반적이지만, fdr/yf의 작동 방식에 따라 다를 수 있습니다.
-                # yfinance의 지수 코드를 위해 ^를 붙이도록 수정합니다. (예: ^GSPC)
-                stock = yf.Ticker(f"^{code}")
+# ======================================================
+# 1. 분석 환경 초기화 (AnalysisInitializer) - 폴더 순회 로직 유지/응용
+# ======================================================
+class AnalysisInitializer:
+    def __init__(self, uploaded_file):
+        # CTk 버전과 동일한 멤버 구조 유지 (API_FILE 대신 secrets 사용)
+        self._model = LLM_MODEL
+        self._instruction = CUSTOM_INSTRUCTION
+        self.llm: Optional[OpenAI] = None
+        self.sdf: Optional[SmartDataframe] = None
+        self.uploaded_file = uploaded_file  # Streamlit 업로드 파일
+
+    def initialize(self) -> Tuple[SmartDataframe, pd.DataFrame, OpenAI]:
+        # API 키는 Streamlit Secrets에서 가져옴
+        if "OPENAI_API_KEY" not in st.secrets:
+            raise RuntimeError("Streamlit secrets에 OPENAI_API_KEY가 없습니다.")
+        api_key = st.secrets["OPENAI_API_KEY"]
+        openai.api_key = api_key
+
+        df = self._load_data()
+
+        # 👈 LLM 인스턴스를 여기서 생성
+        self.llm = OpenAI(api_token=api_key, model=self._model)
+
+        # ★ PandasAI v2.3.2 : df 그대로 전달
+        self.sdf = SmartDataframe(
+            df,
+            config={
+                "llm": self.llm,
+                "verbose": True,
+                "memory": False,
+                "instructions": CUSTOM_INSTRUCTION
+            }
+        )
+
+        return self.sdf, df, self.llm
+
+    # ======================================================
+    # 엑셀 로드 → 전처리 → (여러 파일 병합 구조 유지, 여기서는 업로드된 1개 파일 리스트로 처리)
+    # ======================================================
+    def _load_data(self) -> pd.DataFrame:
+        # CTk 버전은 폴더 내 excel_files를 순회했지만,
+        # Streamlit에서는 업로드된 파일 1개를 "excel_files 리스트"처럼 취급해서
+        # 기존 전처리/병합 로직을 그대로 재사용한다.
+        if self.uploaded_file is None:
+            raise FileNotFoundError("⚠️ 업로드된 엑셀 파일이 없습니다.")
+
+        excel_files = [self.uploaded_file]  # 하나짜리 리스트로 래핑
+
+        print(f"📂 총 {len(excel_files)}개 파일 감지됨:")
+        for f in excel_files:
+            print(f" - {getattr(f, 'name', 'uploaded_file')}")
+
+        all_dfs = []
+
+        # --------------------------------------------------
+        # 1️⃣ 개별 파일 전처리 (원본과 동일한 로직)
+        # --------------------------------------------------
+        for file in excel_files:
+            file_name = getattr(file, "name", "uploaded_file")
+            print(f"🔄 전처리 중: {file_name}")
+            try:
+                df_raw = pd.read_excel(file, header=None)
+
+                # 상단 4줄 삭제
+                df_raw = df_raw.iloc[4:].reset_index(drop=True)
+
+                # 불필요한 열 제거 (E, G, I, K, L, N, O)
+                drop_cols = [4, 6, 8, 10, 11, 13, 14]
+                df_raw = df_raw.drop(df_raw.columns[drop_cols], axis=1)
+
+                # 새 헤더 지정
+                new_columns = [
+                    "장비명", "UT", "Floor",
+                    "사전제작X_비대상(일부공정)(1)_길이",
+                    "사전제작X_A(장비단Final)(2)_길이",
+                    "사전제작○_B(H_UP구간)(3)_당초계획_길이",
+                    "사전제작○_B(H_UP구간)(4)_실제시공_길이",
+                    "사전제작X_C(TV단Final)(5)_길이"
+                ]
+                df_raw.columns = new_columns
+
+                # 숫자형 변환
+                for col in new_columns[3:]:
+                    df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
+
+                # 합계(1+2+4+5) 계산
+                df_raw["합계(1+2+4+5)"] = pd.to_numeric(
+                    df_raw["사전제작X_비대상(일부공정)(1)_길이"].fillna(0)
+                    + df_raw["사전제작X_A(장비단Final)(2)_길이"].fillna(0)
+                    + df_raw["사전제작○_B(H_UP구간)(4)_실제시공_길이"].fillna(0)
+                    + df_raw["사전제작X_C(TV단Final)(5)_길이"].fillna(0),
+                    errors="coerce"
+                ).astype("float64")
+
+                all_dfs.append(df_raw)
+                print(f"✅ {file_name} 전처리 완료: {len(df_raw)}행")
+
+            except Exception as e:
+                print(f"❌ {file_name} 처리 중 오류 발생: {e}")
+
+        # --------------------------------------------------
+        # 2️⃣ 병합 (원본 구조 유지)
+        # --------------------------------------------------
+        if not all_dfs:
+            raise RuntimeError("❌ 전처리에 성공한 파일이 없습니다.")
+
+        for df_raw in all_dfs:
+            if "합계(1+2+4+5)" in df_raw.columns:
+                df_raw["합계(1+2+4+5)"] = pd.to_numeric(
+                    df_raw["합계(1+2+4+5)"], errors="coerce"
+                )
+
+        merged_df = pd.concat(all_dfs, ignore_index=True)
+        print(f"\n📊 전체 병합 완료: 총 {len(merged_df)}행, {len(merged_df.columns)}열")
+
+        return merged_df
+
+
+# ======================================================
+# 2. 질문 가공 로직 (최종 안정 버전 그대로)
+# ======================================================
+class PromptPreprocessor:
+    def __init__(self):
+        self._column_synonyms = COLUMN_SYNONYMS
+        self._value_synonyms = VALUE_SYNONYMS
+        self._ut_exclude = ["장비", "장비들"]
+
+        self._dimension_ut_words = ["UT", "공종", "설비", "유틸리티", "utility"]
+        self._dimension_device_words = ["장비명", "장비"]
+        self._dimension_floor_words = ["층", "층수"]
+
+        # ✅ 한글 조사 리스트 (필요하면 더 추가해도 됨)
+        self._josa_list = [
+            "은", "는", "이", "가",
+            "을", "를", "의",
+            "에", "에서",
+            "로", "으로",
+            "와", "과",
+            "도"
+        ]
+
+    def _normalize_column_words(self, prompt: str) -> str:
+        """컬럼 동의어 + 뒤에 붙은 조사까지 인식해서 컬럼명을 정규화"""
+
+        # 조사 패턴: 위 리스트 중 1개 또는 2글자짜리 조사도 있으니 전체 OR
+        josa_pattern = "(?:" + "|".join(self._josa_list) + ")?"
+
+        for target, syns in self._column_synonyms.items():
+            # syns(별칭) + target(정규 컬럼명) 둘 다 잡도록
+            for syn in syns + [target]:
+                # ✅ 한글이 들어간 동의어인 경우: 우리가 직접 경계 정의 + 조사 허용
+                if re.search(r"[가-힣]", syn):
+                    pattern = rf"(?<![가-힣A-Za-z0-9])" \
+                              rf"({re.escape(syn)})" \
+                              rf"{josa_pattern}" \
+                              rf"(?=[^가-힣A-Za-z0-9]|$)"
+                    prompt = re.sub(pattern, target, prompt)
+                else:
+                    # ✅ 영문/숫자 위주의 동의어(utility 등)는 기존 \b 로 그대로 처리
+                    pattern = rf"\b{re.escape(syn)}\b"
+                    prompt = re.sub(pattern, target, prompt, flags=re.IGNORECASE)
+
+        return prompt
+
+    # ======================================================
+    # 메인 처리 함수 (원본 로직 그대로)
+    # ======================================================
+    def process(self, raw_prompt: str) -> str:
+        if not raw_prompt:
+            return ""
+
+        prompt = raw_prompt.strip()
+        conditions = []
+        selected_columns = []
+        dimension_columns = []
+
+        # --------------------------------------------
+        # 1. 기존 컬럼/값 동의어 치환
+        # --------------------------------------------
+
+        # 🚀 '장비'를 'equipment'로 치환하여 컬럼 동의어 충돌 방지
+        prompt = re.sub(r"\b장비\b", "equipment", prompt)
+
+        # ✅ 컬럼명/별칭 + 조사까지 포함해서 정규화
+        prompt = self._normalize_column_words(prompt)
+
+        for target, syns in self._value_synonyms.items():
+            for syn in syns:
+                prompt = re.sub(
+                    rf"\b{re.escape(syn)}\b", target, prompt, flags=re.IGNORECASE
+                )
+
+        prompt = re.sub(r"\b배관\b", "유틸리티", prompt)
+        prompt = re.sub(r"\b물량\b", "물량들", prompt)
+
+        # ----------------------------------------------------
+        # 2. ⭐ 차원 분석(별, 띄어쓰기 모두 감지)
+        # ----------------------------------------------------
+
+        for word in self._dimension_ut_words:
+            if re.search(rf"{word}\s*별", raw_prompt, flags=re.IGNORECASE):
+                dimension_columns.append("UT")
+                prompt = re.sub(rf"{word}\s*별", "", prompt)
+                break
+
+        for word in self._dimension_device_words:
+            if re.search(rf"{word}\s*별", raw_prompt, flags=re.IGNORECASE):
+                dimension_columns.append("장비명")
+                prompt = re.sub(rf"{word}\s*별", "", prompt)
+                break
+
+        for word in self._dimension_floor_words:
+            if re.search(rf"{word}\s*별", raw_prompt, flags=re.IGNORECASE):
+                dimension_columns.append("Floor")
+                prompt = re.sub(rf"{word}\s*별", "", prompt)
+                break
+
+        # ----------------------------------------------------
+        # 3. 기본 조건(Floor/UT/장비명 감지)
+        # ----------------------------------------------------
+
+        for fl in ["1F", "2F", "3F"]:
+            if re.search(rf"\b{fl}\b", prompt):
+                conditions.append(f'(Floor == "{fl}")')
+                prompt = re.sub(rf"\b{fl}\b", "", prompt)
+
+        for val in self._value_synonyms.keys():
+            if val not in ["1F", "2F", "3F"] and val not in self._ut_exclude:
+                if re.search(rf"\b{val}\b", prompt):
+                    conditions.append(f'(UT == "{val}")')
+                    prompt = re.sub(rf"\b{val}\b", "", prompt)
+
+        device_matches = [
+            word for word in re.findall(r"\b[A-Za-z0-9]{3,}\b", prompt)
+            if any(c.isalpha() for c in word) and any(c.isdigit() for c in word)
+        ]
+
+        for dev in device_matches:
+            conditions.append(f'(장비명 == "{dev}")')
+            prompt = prompt.replace(dev, "")
+
+        # ----------------------------------------------------
+        # 4. 출력 컬럼 자동 감지
+        # ----------------------------------------------------
+
+        for col in self._column_synonyms.keys():
+            if col in prompt:
+                selected_columns.append(col)
+                prompt = prompt.replace(col, "")
+
+        # ----------------------------------------------------
+        # 5. 명령어 표준화 (단순화 로직 적용)
+        # ----------------------------------------------------
+
+        # 띄어쓰기를 제외한 문자열에서 한글만 추출
+        korean_chars = re.sub(r"[^가-힣]", "", prompt)
+
+        # 한글이 2글자 이상 포함되어 있다면 표준 명령 삽입
+        if len(korean_chars) >= 2:
+
+            # 기존에 있던 '보여줘/알려줘/구해줘' 등의 패턴을 먼저 제거합니다.
+            command_patterns = r"(보여줘|알려줘|구해줘|리스트해줘|정리해줘|목록화해줘|합은|총합은|합계는|총량은|몇이야|몇개야|얼마야|어떻게 돼|얼마인지|결과는)"
+            prompt = re.sub(command_patterns, "", prompt)
+
+            # 새로운 표준 명령 삽입
+            prompt = prompt.strip() + " 데이터프레임으로 보여줘"
+
+        # ----------------------------------------------------
+        # 6. 조립
+        # ----------------------------------------------------
+
+        final_parts = []
+        if conditions:
+            final_parts.append(" AND ".join(conditions))
+        if selected_columns:
+            final_parts.append(f"출력컬럼 = {['장비명','UT','Floor'] + selected_columns}")
+        if dimension_columns:
+            final_parts.append(f"차원컬럼 = {dimension_columns}")
+            final_parts.append("집계방식 = 'sum'")
+        final_parts.append(prompt)
+        final = " ".join(final_parts)
+        final = re.sub(r"\s+", " ", final).strip()
+
+        return final
+
+
+# ======================================================
+# 스마트 응답 모듈 (Smart Response Engine) - 원본 그대로
+# ======================================================
+class SmartResponseEngine:
+    def __init__(self):
+        pass
+
+    # 1. 결과가 DF인지 확인
+    def is_dataframe(self, result: Any) -> bool:
+        if isinstance(result, dict) and result.get("type") == "dataframe":
+            return True
+        if isinstance(result, pd.DataFrame):
+            return True
+        return False
+
+    # 2. DF 분석 (SUM/MEAN/MAX/MIN 계산)
+    def analyze_dataframe(self, df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+        df = df.apply(pd.to_numeric, errors="ignore")
+        numeric_cols = df.select_dtypes(include=["int64", "float64"]).columns
+        stats = {}
+
+        for col in numeric_cols:
+            stats[col] = {
+                "sum": float(df[col].sum()),
+                "mean": float(df[col].mean()),
+                "max": float(df[col].max()),
+                "min": float(df[col].min())
+            }
+
+        return stats
+
+    # 3. 스마트 응답을 DataFrame 형태로 생성 (llm 인스턴스 추가)
+    def generate_smart_response(self, df_stats: Dict, prompt: str, llm_instance: OpenAI) -> Tuple[str, pd.DataFrame]:
+        # ▶️ 1. 통계표 생성용 데이터
+        stats_dict = {
+            "SUM": {},
+            "MEAN": {},
+            "MAX": {},
+            "MIN": {}
+        }
+
+        def format_value(v: float) -> str:
+            rounded = round(v, 2)
+            return str(int(rounded)) if rounded == int(rounded) else f"{rounded:.2f}"
+
+        # ✅ 합계(1+2+4+5) 컬럼의 sum을 기준 total_sum으로 사용
+        total_sum_entry = df_stats.get("합계(1+2+4+5)")
+        total_sum = float(total_sum_entry["sum"]) if total_sum_entry else 0.0
+
+        # ▶️ 2. JSON 구조 생성 (LLM 전달용)
+        stats_json = {}
+        for col, values in df_stats.items():
+            entry = {"sum": round(values["sum"], 2)}
+
+            # ✅ total_sum 비율 계산
+            if total_sum > 0:
+                entry["ratio_to_total"] = round(values["sum"] / total_sum * 100, 1)
+
+            # ✅ 계획 대비 시공 비율 계산
+            if "당초계획" in col:
+                for other_col in df_stats:
+                    if "실제시공" in other_col:
+                        plan = values["sum"]
+                        real = df_stats[other_col]["sum"]
+                        if plan > 0:
+                            ratio = round(real / plan * 100, 1)
+                            diff = round(real - plan, 2)
+                            trend = (
+                                "시공이 계획보다 많음" if real > plan
+                                else "시공이 계획보다 적음" if real < plan
+                                else "계획과 동일"
+                            )
+                            stats_json[other_col] = stats_json.get(other_col, {})
+                            stats_json[other_col].update({
+                                "plan_to_real_ratio": ratio,
+                                "plan_to_real_diff": diff,
+                                "plan_to_real_trend": trend
+                            })
+
+            stats_json[col] = entry
+
+            # ✅ 합계 컬럼은 SUM만 표시, 나머지는 '-'
+            if col == "합계(1+2+4+5)":
+                stats_dict["SUM"][col] = format_value(values["sum"])
+                stats_dict["MEAN"][col] = "-"
+                stats_dict["MAX"][col] = "-"
+                stats_dict["MIN"][col] = "-"
             else:
-                stock = yf.Ticker(code)
+                stats_dict["SUM"][col] = format_value(values["sum"])
+                stats_dict["MEAN"][col] = format_value(values["mean"])
+                stats_dict["MAX"][col] = format_value(values["max"])
+                stats_dict["MIN"][col] = format_value(values["min"])
 
-            # 종목 이름 가져오기
-            stock_name = stock.info.get('shortName', '이름을 찾을 수 없습니다.')
-            if stock_name == '이름을 찾을 수 없습니다.' and 'longName' in stock.info:
-                 stock_name = stock.info.get('longName')
-                 
-            stocks_info[code] = stock_name
+        # ✅ 사전제작 물량 vs 비진행 물량 비교 
+        try:
+            pre_fab_sum = df_stats.get("사전제작○_B(H_UP구간)(4)_실제시공_길이", {}).get("sum", 0)
+            non_pre_fab_sum = sum([
+                df_stats.get("사전제작X_비대상(일부공정)(1)_길이", {}).get("sum", 0),
+                df_stats.get("사전제작X_A(장비단Final)(2)_길이", {}).get("sum", 0),
+                df_stats.get("사전제작X_C(TV단Final)(5)_길이", {}).get("sum", 0)
+            ])
+
+            if non_pre_fab_sum > 0:
+                pre_ratio = round(pre_fab_sum / non_pre_fab_sum * 100, 1)
+
+                if pre_ratio > 100:
+                    trend = f"사전제작 진행물량은 비진행 물량보다 {round(pre_ratio / 100, 2)}배 많습니다."
+                elif pre_ratio == 100:
+                    trend = "사전제작 진행물량과 비진행 물량은 동일한 수준입니다."
+                else:
+                    trend = f"사전제작 진행물량은 비진행 물량 대비 {pre_ratio}% 수준으로 상대적으로 적습니다."
+
+                stats_json["사전제작_비진행_비교"] = {
+                    "사전제작_물량합계": round(pre_fab_sum, 2),
+                    "비진행_물량합계": round(non_pre_fab_sum, 2),
+                    "사전제작_비율(비진행_기준%)": pre_ratio,
+                    "비교결과": trend
+                }
 
         except Exception as e:
-            # st.error(f"Error fetching info for {code}: {e}") # 디버깅용
-            stocks_info[code] = '이름을 찾을 수 없습니다.'
+            stats_json["사전제작_비진행_비교"] = {"오류": str(e)}
 
-# 종목 코드와 이름 좌우 배열로 표시
-col_name1, col_name2, col_name3 = st.columns(3)
+        stats_df = pd.DataFrame(stats_dict)
 
-with col_name1:
-    st.markdown(f"<span style='color: black;'>{code1}({stocks_info.get(code1.strip(), '')})</span>", unsafe_allow_html=True)
+        stats_json_str = json.dumps(stats_json, ensure_ascii=False, indent=2)
 
-with col_name2:
-    st.markdown(f"<span style='color: black;'>{code2}({stocks_info.get(code2.strip(), '')})</span>", unsafe_allow_html=True)
+        # ▶️ 3. LLM 프롬프트 구성
+        insight_prompt = f"""
+다음은 특정 설비 배관 데이터에 대한 정량 분석 결과이다.
+주어진 수치를 참고하여 현장 엔지니어 관점에서 의미 있는 인사이트를 5문장 이내로 생성하라.
 
-with col_name3:
-    st.markdown(f"<span style='color: black;'>{code3}({stocks_info.get(code3.strip(), '')})</span>", unsafe_allow_html=True)
+단:
+- 어떤 항목을 강조할지 스스로 판단하라.
+- 비율 및 변화량은 반드시 JSON에 제공된 숫자만 사용한다.
+- '계획 대비 시공', '합계 대비 비율', '가장 큰 항목', '사전제작 진행물량' 등은 필요 시 선택적으로 언급하라.
+- '사전제작 vs 비진행 비교'는 반드시 "사전제작은 비진행 대비 xx% 수준"으로 표현하라.
+- 사전제작이 적은 경우 '작게 나타났다' 또는 '상대적으로 적다' 등의 표현을 사용할 것.
+- 인사이트는 '데이터를 해석한 문장'이어야 하며, 다시 숫자를 나열하지 마라.
 
-# '기준시점 수익률 비교' 체크박스
-fixed_ratio = st.checkbox("기준시점 수익률 비교(Baseline return)", value=True) # 기본값 True로 변경
+JSON 데이터:
+{{
+  "stats": {stats_json_str},
+  "total_sum": {round(total_sum, 2)}
+}}
+        """.strip()
 
-# 수평선 추가
+        # ▶️ 4. LLM 호출 (직접 OpenAI SDK 사용)
+        try:
+            from openai import OpenAI as OpenAIClient
+            client = OpenAIClient(api_key=openai.api_key)
+
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a senior data analysis assistant."},
+                    {"role": "user", "content": insight_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=400
+            )
+
+            insight = response.choices[0].message.content.strip()
+
+        except Exception as e:
+            insight = f"⚠️ 인사이트 생성 실패: {e}"
+
+        # ▶️ 5. 질문 요약 + 인사이트 조합
+        cleaned_prompt = self.clean_prompt_for_summary(prompt)
+        summary_text = (
+            "📌 **AI 스마트 분석 결과**\n\n"
+            f"💬 분석 요청 요약: **{cleaned_prompt}**\n\n"
+            f"🧠 **LLM 인사이트 요약:**\n\n{insight.strip()}\n"
+        )
+
+        return summary_text, stats_df
+
+    # 4. 스마트 자연어 응답에서 데이터 프레임 문구 제거
+    def clean_prompt_for_summary(self, prompt: str) -> str:
+        """
+        자연어 응답용 질문 정제: 
+        '데이터프레임으로 보여줘' → '데이터 기반으로 AI 분석을 통해 인사이트와 활용방안을 제공합니다.'
+        """
+        # 제거할 명령어 패턴
+        remove_patterns = [
+            r"데이터프레임으로\s*보여줘",
+            r"보여줘",
+            r"데이터프레임",
+            r"알려줘",
+            r"구해줘",
+            r"리스트해줘",
+            r"정리해줘",
+            r"목록화해줘",
+            r"결과는",
+            r"합은",
+            r"총합은"
+        ]
+
+        clean = prompt
+
+        # 불필요 명령 제거
+        for p in remove_patterns:
+            clean = re.sub(p, "", clean).strip()
+
+        # 마지막 문구를 고정해서 붙여줌
+        clean += " — 데이터 기반으로 AI 분석을 통해 인사이트와 활용방안을 제공합니다."
+
+        return clean
+
+
+# ======================================================
+# 4. Streamlit UI (CTk App.perform_analysis 로직을 그대로 옮김)
+# ======================================================
+
+st.title("📊 PandasAI 대화형 데이터 분석기 (Streamlit 전환 버전)")
 st.markdown("---")
 
-# 체크박스 그룹 (순서 변경)
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    show_us_etf = st.checkbox("미국ETF", value=False)  # 미국ETF
-with col2:
-    show_kr_etf = st.checkbox("한국ETF", value=False)  # 한국ETF
-with col3:
-    show_major_stocks = st.checkbox("주요종목", value=False)  # 주요종목
-with col4:
-    show_major_index = st.checkbox("지수", value=False)  # 지수
+# --- 사이드바: 엑셀 업로드 ---
+st.sidebar.header("📁 엑셀 업로드")
+uploaded_file = st.sidebar.file_uploader(
+    "사전배관제작 물량 엑셀 파일을 선택하세요 (.xlsx)",
+    type=["xlsx"]
+)
 
-# 입력된 종목 코드를 리스트로 생성
-codes = [code1, code2, code3]
-codes = [code.strip() for code in codes if code]  # 빈 코드 제거
+if not uploaded_file:
+    st.info("👈 왼쪽 사이드바에서 엑셀 파일을 업로드하면 분석을 시작할 수 있습니다.")
+    st.stop()
 
-# '미국ETF' 체크박스와 연결된 데이터 행렬
-data_matrix_us_etf = [
-    ['-3X', '-2X', '-1X', '코드', '1X', '2X', '3X'],  # 1행
-    ['SPXU', 'SDS', 'SH', 'S&P500', 'SPY', 'SSO', 'UPRO'],  # 2행
-    ['SQQQ', 'QID', 'PSQ', '나스닥100', 'QQQ', 'QLD', 'TQQQ'],  # 3행
-    ['SDOW', 'DXD', 'DOG', '다우존스', 'DIA', 'DDM', 'UDOW'],  # 4행
-    ['TZA', 'TWM', 'RWM', '러셀2000', 'IWM', 'UWM', 'TNA'],  # 5행
-    ['', '', '', '한국', 'EWY', 'KORU', ''],  # 6행
-    ['YANG', 'FXP', 'CHAD', '중국', 'FXI', 'CHAU', 'YINN'],  # 7행
-    ['', 'EWV', '', '일본', 'EWJ', 'EZJ', 'JPNL'],  # 8행
-    ['', '', '', '베트남', 'VNM', '', ''],  # 9행
-    ['INDZ', '', '', '인도', 'INDA', '', 'INDL'],  # 10행
-    ['RUSS', '', '', '러시아', 'RSX', '', 'RUSL'],  # 11행
-    ['', 'BZQ', '', '브라질', 'EWZ', '', 'BRZU'],  # 12행
-    ['DGLD', 'GLL', 'DGZ', '금', 'GLD', 'DGP', 'UGLD'],  # 13행
-    ['DSLV', 'ZSL', '', '은', 'SLV', 'AGQ', 'USLV'],  # 14행
-    ['DWT', 'SCO', '', '원유', 'USO', 'UCO', ''],  # 15행
-    ['DGAZ', 'KOLD', '', '천연가스', 'UNG', 'BOIL', 'UGAZ'],  # 16행
-    ['', '', '', '농산물', 'DBA', '', ''],  # 17행
-]
+# --- 초기화 (RESET_ON_QUERY 고려해서 세션에 저장) ---
+if "sdf" not in st.session_state or "df" not in st.session_state or "llm" not in st.session_state or RESET_ON_QUERY:
+    initializer = AnalysisInitializer(uploaded_file)
+    sdf_instance, df, llm_instance = initializer.initialize()
+    st.session_state.sdf = sdf_instance
+    st.session_state.df = df
+    st.session_state.llm = llm_instance
+else:
+    sdf_instance = st.session_state.sdf
+    df = st.session_state.df
+    llm_instance = st.session_state.llm
 
-# '지수' 체크박스와 연결된 데이터 행렬
-data_matrix_index = [
-    ['한국코드', '설명', '미국코드', '설명', '기타코드', '설명'],  # 1행
-    ['KS11', 'KOSPI지수', 'DJI', '다우존스', 'JP225', '닛케이225선물'],  # 2행
-    ['KQ11', 'KOSDAQ지수', 'IXIC', '나스닥', 'STOXX50E', 'EuroStoxx50'],  # 3행
-    ['KS50', 'KOSPI50지수', 'GSPC', 'S&P500', 'CSI300', 'CSI300(중국)'],  # 4행
-    ['KS100', 'KOSPI100', 'VIX', 'S&P500VIX', 'HSI', '항셍(홍콩)'],  # 5행
-    ['KRX100', 'KRX100', '-', '-', 'FTSE', '영국FTSE'],  # 6행
-    ['KS200', '코스피200', '-', '-', 'DAX', '독일DAX30'],  # 7행
-]
+preprocessor = PromptPreprocessor()
+engine = SmartResponseEngine()
 
-# 시가총액 상위 11개 종목 데이터 행렬
-data_matrix_top_stocks = [
-    ['미국종목코드', '설명', '한국종목코드', '설명'],  # 1행
-    ['AAPL', '애플', '005930', '삼성전자'],  # 2행
-    ['MSFT', '마이크로소프트', '000660', 'SK하이닉스'],  # 3행
-    ['AMZN', '아마존', '373220', 'LG에너지솔루션'],  # 4행
-    ['NVDA', '엔비디아', '207940', '삼성바이오로직스'],  # 5행
-    ['GOOGL', '알파벳A', '005380', '현대차'],  # 6행
-    ['META', '메타', '068270', '셀트리온'],  # 7행
-    ['TSLA', '테슬라', '000270', '기아'],  # 8행
-    ['BRK.B', '버크셔헤서웨이', '196170', '알테오젠'],  # 9행
-    ['UNH', '유나이티드헬스', '247540', '에코프로비엠'],  # 10행
-    ['JNJ', '존슨앤존슨', '086520', '에코프로'],  # 11행
-]
+# --- 데이터프레임 미리보기 ---
+st.subheader("🔎 업로드된 데이터 미리보기")
+st.dataframe(df.head())
 
-# 한국ETF 체크박스와 연결된 데이터 행렬 (4열)
-data_matrix_kr_etf = [
-    ['한국종목코드', '설명', '한국종목코드', '설명'],  # 열 제목
-    ['069500', 'KODEX 200', '122630', 'KODEX 레버리지'],
-    ['229200', 'KODEX 코스닥150', '233740', 'KODEX 코스닥150레버리지'],
-    ['114800', 'KODEX 인버스', '252670', 'KODEX 200선물인버스2X'],
-    ['251340', 'KODEX 코스닥150선물인버스', '442580', 'PLUS 글로벌HBM반도체'],
-    ['243890', 'TIGER 200에너지화학레버리지', '412570', 'TIGER 2차전지TOP10레버리지'],
-    ['463640', 'KODEX 미국S&P500유틸리티', '379800', 'KODEX 미국S&P500TR'],
-    ['379810', 'KODEX 미국나스닥100TR', '449190', 'KODEX 미국나스닥100(H)'],
-    ['409820', 'KODEX 미국나스닥100레버리지(합성 H)', '438100', 'ACE 미국나스닥100채권혼합액티브'],
-    ['447660', 'PLUS 애플채권혼합', '448540', 'ACE 엔비디아채권혼합블룸버그'],
-    ['236350', 'TIGER 인도니프티50레버리지(합성)', '132030', 'KODEX 골드선물(H)'],
-    ['144600', 'KODEX 은선물(H)', '530063', '삼성 레버리지 구리 선물 ETN(H)'],
-    ['530031', '삼성 레버리지 WTI원유 선물 ETN', '530036', '삼성 인버스 2X WTI원유 선물 ETN'],
-    ['438320', 'TIGER 차이나항셍테크레버리지(합성 H)', '371460', 'TIGER 차이나전기차SOLACTIVE'],
-]
+st.markdown("## 💬 분석 질문 입력")
 
-# '주요종목' 체크박스를 선택할 때 표 출력
-if show_major_index or show_major_stocks or show_us_etf or show_kr_etf:
-    # 미국ETF 표 출력
-    if show_us_etf:
-        st.markdown("<h4 style='font-size: 16px; text-align: left; margin-top: 20px;'>미국 ETF 주요 코드</h4>", unsafe_allow_html=True)
-        html = '''
-        <style>
-        table {
-            border-collapse: collapse;  
-            width: 100%;  
-            font-size: 10px;  /* 글자 크기를 10px로 설정 */
-        }
-        td {
-            border: 1px solid black;  
-            padding: 8px;  
-            text-align: center;
-            /* color: #333333; <-- 일반 셀의 텍스트 색상 고정 제거 */
-        }
-        .highlight {
-            background-color: lightgray;
-            color: #333333; /* 다크 모드에서도 대비가 확보되도록 텍스트 색상을 어두운 회색으로 고정 */
-        }
-        </style>
-        <table>
-        '''
-        
-        for i, row in enumerate(data_matrix_us_etf):
-            html += '<tr>'
-            for j, cell in enumerate(row):
-                if i == 0 or j == 3:  # 첫 번째 행과 코드 열 강조
-                    html += f'<td class="highlight">{cell}</td>'
-                else:
-                    html += f'<td>{cell}</td>'
-            html += '</tr>'
-        html += '</table>'
-        st.markdown(html, unsafe_allow_html=True)
+with st.form("query_form"):
+    user_query = st.text_input(
+        "분석할 내용을 입력하고 Enter 또는 버튼을 눌러 실행하세요.",
+        placeholder="예: 5TFSP1001 2층 톡식가스 물량 알려줘"
+    )
+    submitted = st.form_submit_button("🚀 AI 분석 실행")
 
-    # 한국ETF 표 출력
-    if show_kr_etf:
-        st.markdown("<h4 style='font-size: 16px; text-align: left; margin-top: 20px;'>한국 ETF 주요 코드</h4>", unsafe_allow_html=True)
-        html_kr_etf = '''
-        <style>
-        table {
-            border-collapse: collapse;  
-            width: 100%;  
-            font-size: 10px;  /* 글자 크기를 10px로 설정 */
-        }
-        td {
-            border: 1px solid black;  
-            padding: 8px;  
-            text-align: center;
-            /* color: #333333; <-- 일반 셀의 텍스트 색상 고정 제거 */
-        }
-        .highlight {
-            background-color: lightgray;
-            color: #333333; /* 다크 모드에서도 대비가 확보되도록 텍스트 색상을 어두운 회색으로 고정 */
-        }
-        </style>
-        <table>
-        '''
-        
-        for i, row in enumerate(data_matrix_kr_etf):
-            html_kr_etf += '<tr>'
-            for j, cell in enumerate(row):
-                if i == 0 or j == 1 or j == 3:  # 첫 번째 행과 코드 열 강조
-                    html_kr_etf += f'<td class="highlight">{cell}</td>'
-                else:
-                    html_kr_etf += f'<td>{cell}</td>'
-            html_kr_etf += '</tr>'
-        html_kr_etf += '</table>'
-        st.markdown(html_kr_etf, unsafe_allow_html=True)
-    
-    # 주요종목 표 출력
-    if show_major_stocks:
-        st.markdown("<h4 style='font-size: 16px; text-align: left; margin-top: 20px;'>주요 시가총액 상위 종목 코드</h4>", unsafe_allow_html=True)
-        html_major_stocks = '''
-        <style>
-        table {
-            border-collapse: collapse;  
-            width: 100%;  
-            font-size: 10px;  /* 글자 크기를 10px로 설정 */
-        }
-        td {
-            border: 1px solid black;  
-            padding: 8px;  
-            text-align: center;
-            /* color: #333333; <-- 일반 셀의 텍스트 색상 고정 제거 */
-        }
-        .highlight {
-            background-color: lightgray;
-            color: #333333; /* 다크 모드에서도 대비가 확보되도록 텍스트 색상을 어두운 회색으로 고정 */
-        }
-        </style>
-        <table>
-        '''
-        
-        for i, row in enumerate(data_matrix_top_stocks):
-            html_major_stocks += '<tr>'
-            for j, cell in enumerate(row):
-                if i == 0 or j == 1 or j == 3:  # 첫 번째 행과 코드 열 강조
-                    html_major_stocks += f'<td class="highlight">{cell}</td>'
-                else:
-                    html_major_stocks += f'<td>{cell}</td>'
-            html_major_stocks += '</tr>'
-        html_major_stocks += '</table>'
-        st.markdown(html_major_stocks, unsafe_allow_html=True)
+if submitted:
+    if not user_query.strip():
+        st.warning("분석 질문을 입력해주세요.")
+    else:
+        with st.spinner("⏳ AI가 분석 중입니다..."):
+            # 1) 질문 가공
+            processed = preprocessor.process(user_query)
 
-    # 지수 표 출력
-    if show_major_index:
-        st.markdown("<h4 style='font-size: 16px; text-align: left; margin-top: 20px;'>주요 지수 코드</h4>", unsafe_allow_html=True)
-        html_index = '''
-        <style>
-        table {
-            border-collapse: collapse;  
-            width: 100%;  
-            font-size: 10px;  /* 글자 크기를 10px로 설정 */
-        }
-        td {
-            border: 1px solid black;  
-            padding: 8px;  
-            text-align: center;
-            /* color: #333333; <-- 일반 셀의 텍스트 색상 고정 제거 */
-        }
-        .highlight {
-            background-color: lightgray;
-            color: #333333; /* 다크 모드에서도 대비가 확보되도록 텍스트 색상을 어두운 회색으로 고정 */
-        }
-        </style>
-        <table>
-        '''
-        
-        for i, row in enumerate(data_matrix_index):
-            html_index += '<tr>'
-            for j, cell in enumerate(row):
-                if i == 0 or j == 1 or j == 3 or j == 5:  # 첫 번째 행과 코드 열 강조
-                    html_index += f'<td class="highlight">{cell}</td>'
-                else:
-                    html_index += f'<td>{cell}</td>'
-            html_index += '</tr>'
-        html_index += '</table>'
-        st.markdown(html_index, unsafe_allow_html=True)
-
-# 데이터 로딩 부분에서 오류 처리
-if codes and start_date and end_date:  # 'date'를 'start_date'와 'end_date'로 수정
-    dataframes = []
-    
-    for code in codes:
-        try:
-            df = fdr.DataReader(code, start_date, end_date)  # 'date'를 'start_date', 'end_date'로 수정
-            close_prices = df['Close']
-            if fixed_ratio:
-                start_price = close_prices.iloc[0]
-                data = ((close_prices - start_price) / start_price) * 100
-                dataframes.append(data.rename(code))
-            else:
-                dataframes.append(close_prices.rename(code))
-        except Exception:  # Exception을 처리하되, 오류 메시지를 표시하지 않음
-            st.warning(f"**{code}**의 데이터를 불러오는 데 문제가 발생했습니다. 종목 코드와 날짜를 확인해 주세요.")
-
-    # 데이터프레임 리스트가 있을 경우
-    if dataframes and not all(df.empty for df in dataframes):
-        combined_data = pd.concat(dataframes, axis=1)
-        tab1, tab2 = st.tabs(['차트', '데이터'])
-    
-        with tab1:
-            st.line_chart(combined_data, use_container_width=True)
-            if fixed_ratio:
-                st.write("Y축은 비율로 표시되며, 기준시점 0% 에서 시작합니다.")
-    
-        with tab2:
+            # 2) PandasAI 실행 (CTk의 perform_analysis 로직 대응)
             try:
-                # 모든 종목의 전체 데이터를 병합합니다.
-                all_data = pd.concat(
-                    [fdr.DataReader(code, start_date, end_date).rename(columns=lambda x: f"{x} ({code})") for code in codes], 
-                    axis=1
+                result = sdf_instance.chat(processed)
+                generated_code = sdf_instance.last_code_generated
+            except Exception as e:
+                st.error(f"❌ 분석 오류: {e}")
+                st.stop()
+
+            # 3) 상단: 질문 가공 결과
+            st.markdown("### ✨ 질문 가공 결과")
+            st.code(processed, language="text")
+
+            # 4) 중간: LLM 생성 코드
+            st.markdown("### 💻 LLM 생성 코드")
+            st.code(generated_code, language="python")
+
+            # 5) 하단: AI 분석 결과 + 스마트 통계 요약
+            st.markdown("### 💡 AI 분석 결과")
+
+            if engine.is_dataframe(result):
+                df_out = result.get("value", result)
+
+                # 통계 분석
+                stats = engine.analyze_dataframe(df_out)
+
+                # 스마트 응답 생성
+                summary_text, smart_df = engine.generate_smart_response(
+                    stats, processed, llm_instance
                 )
-                st.dataframe(all_data)
-            except Exception:
-                 st.warning("데이터 탭에 모든 상세 데이터를 표시하는 데 문제가 발생했습니다.")
-            
-            # 컬럼 설명을 표 형식으로 표시
-            column_description = {
-                '컬럼명': ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume'],
-                '설명': ['시가', '고가', '저가', '종가', '수정 종가', '거래량']
-            }
-            description_df = pd.DataFrame(column_description)
-            st.table(description_df)
 
-# 조회 시작일 가상 투자금액의 수익률 및 수익금액 계산(진행중)
+                # 요약 텍스트
+                st.markdown(summary_text)
 
-# 수익금액 비교 입력
-st.markdown("<h2 style='font-size: 20px; margin-top: 30px;'>1천만원을 투자했다면,</h2>", unsafe_allow_html=True)
-
-# 고정된 투자금액 (1000만원)
-initial_investment = 10000000  
-
-# 각 종목의 수익률 및 수익금액 계산
-if codes and start_date and end_date:
-    profit_info = []
-
-    for code in codes:
-        try:
-            df = fdr.DataReader(code, start_date, end_date)
-            close_prices = df['Close']
-            start_price = close_prices.iloc[0]  # 시작 가격
-            end_price = close_prices.iloc[-1]    # 종료 가격
-
-            # 수익률 계산
-            return_percentage = ((end_price - start_price) / start_price) * 100
-            # 수익금액 계산
-            profit_amount = (return_percentage / 100) * initial_investment
-            total_amount = initial_investment + profit_amount
-
-            # 종목 이름 가져오기
-            stock_name = stocks_info.get(code.strip(), '이름을 찾을 수 없습니다.')
-
-            # 수익률 색상 결정
-            if return_percentage >= 0:
-                color = 'red'  # 양수일 경우 붉은색
+                # 통계 DF 출력
+                st.markdown("#### 📊 [AI 스마트 통계 요약]")
+                st.dataframe(smart_df)
             else:
-                color = 'blue'   # 음수일 경우 파란색
-
-            # 투자결과 출력
-            profit_info.append(f"**{stock_name}** ({code})에 투자한 결과 **{total_amount:,.0f} 원**이 되었습니다. (<span style='color: {color};'>수익률: **{return_percentage:.2f}%**</span>)")
-            
-        except Exception:
-            profit_info.append(f"**{code}**의 데이터를 불러오는 데 문제가 발생했습니다.")
-
-    # 수익률 및 수익금액 결과 출력
-    for info in profit_info:
-        st.markdown(info, unsafe_allow_html=True)  # HTML을 안전하게 허용하여 출력
+                # result가 DF가 아니라면 그대로 출력
+                st.write(result)
