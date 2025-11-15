@@ -633,7 +633,7 @@ uploaded_file = st.sidebar.file_uploader(
     accept_multiple_files=True  # ✅ 여러 개 파일 허용
 )
 
-if not uploaded_file:
+if not uploaded_files:
     st.info("👈 왼쪽 사이드바에서 엑셀 파일을 업로드하면 분석을 시작할 수 있습니다.")
     st.stop()
     
@@ -714,6 +714,7 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
 
