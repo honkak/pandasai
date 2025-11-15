@@ -653,10 +653,6 @@ else:
 preprocessor = PromptPreprocessor()
 engine = SmartResponseEngine()
 
-# --- 데이터프레임 미리보기 ---
-st.subheader("🔎 업로드된 데이터 미리보기")
-st.dataframe(df.head())
-
 st.markdown("## 💬 분석 질문 입력")
 
 with st.form("query_form"):
@@ -717,6 +713,7 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
 
