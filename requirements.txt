@@ -5,3 +5,4 @@ pandasai==2.3.2
 openpyxl
 numpy==1.23.5 
 regex>=2023.12.25
+pyyaml
