@@ -1,5 +1,5 @@
 # ======================================================
-# 본격 편집 중 REV8 - PandasAI Streamlit App (CTk 로직 완전 이식)
+# 본격 편집 중 REV7 - PandasAI Streamlit App (CTk 로직 완전 이식)
 # ======================================================
 
 import streamlit as st
@@ -17,7 +17,6 @@ import os
 # 0. 설정 및 상수 정의
 # ======================================================
 LLM_MODEL = "gpt-3.5-turbo"  # "gpt-3.5-turbo", "gpt-4o"
-EXCEL_FILE = "5TFSP1001.xlsx"  # 원래 코드에 있던 상수 (경로는 이제 안씀)
 RESET_ON_QUERY = True  # True: 매 쿼리마다 SmartDataframe 재생성 / False: 세션 재사용
 
 # ======================================================
@@ -115,7 +114,6 @@ st.set_page_config(
 class AnalysisInitializer:
     def __init__(self, uploaded_file):
         # CTk 버전과 동일한 멤버 구조 유지 (API_FILE 대신 secrets 사용)
-        self._excel_file = EXCEL_FILE
         self._model = LLM_MODEL
         self._instruction = CUSTOM_INSTRUCTION
         self.llm: Optional[OpenAI] = None
