@@ -566,7 +566,7 @@ JSON 데이터:
                     {"role": "system", "content": "You are a senior data analysis assistant."},
                     {"role": "user", "content": insight_prompt}
                 ],
-                temperature=0.3,
+                temperature=0.0,
                 max_tokens=400
             )
 
@@ -713,6 +713,7 @@ if submitted:
             else:
                 # result가 DF가 아니라면 그대로 출력
                 st.write(result)
+
 
 
 
